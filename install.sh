@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Builds Pixelator.app and installs the "Pixelate Image" Finder Quick Action.
+# Builds Pixelator.app and installs the "Pixelate Image or PDF" Finder Quick Action.
 # Requires Xcode Command Line Tools (swiftc). Nothing is downloaded.
 #
 #   ./install.sh              build app + install Quick Action
@@ -69,12 +69,13 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
     <key>CFBundleDocumentTypes</key>
     <array>
         <dict>
-            <key>CFBundleTypeName</key>    <string>Image</string>
+            <key>CFBundleTypeName</key>    <string>Image or PDF</string>
             <key>CFBundleTypeRole</key>    <string>Editor</string>
             <key>LSHandlerRank</key>       <string>Alternate</string>
             <key>LSItemContentTypes</key>
             <array>
                 <string>public.image</string>
+                <string>public.pdf</string>
             </array>
         </dict>
     </array>
@@ -120,7 +121,7 @@ cat <<EOF
 
 Done.
 
-  Right-click any image in Finder -> Quick Actions -> Pixelate Image
+  Right-click any image in Finder -> Quick Actions -> Pixelate Image or PDF
   Or:  Open With -> Pixelator
   Or:  open -n -b local.pixelator --args /path/to/some.png
 

@@ -1,6 +1,7 @@
 import Cocoa
 import CoreImage
 import UniformTypeIdentifiers
+import PDFKit
 
 // ---------------------------------------------------------------------------
 // Pixelator — a tiny AppKit helper that opens an image, lets you drag
@@ -9,6 +10,11 @@ import UniformTypeIdentifiers
 //
 // All geometry is done in CGContext space (origin bottom-left) so that view
 // coordinates, image pixel coordinates and drawing coordinates all agree.
+//
+// Single-page PDFs are rasterized on load and written back out as a one-page
+// PDF of the original physical size. That is deliberate: drawing a black box
+// over a PDF leaves every character extractable underneath it, which is how
+// "redacted" documents leak. Rasterizing makes the text stop being text.
 // ---------------------------------------------------------------------------
 
 let sRGB = CGColorSpace(name: CGColorSpace.sRGB)!
@@ -33,6 +39,48 @@ func loadImage(_ url: URL) -> CGImage? {
     }
     guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
     return CGImageSourceCreateImageAtIndex(src, 0, nil)
+}
+
+/// Resolution PDF pages are rasterized at: 3x the 72pt PDF unit = 216 dpi.
+let pdfScale: CGFloat = 3.0
+
+/// A loaded source: pixels, plus page geometry when it came from a PDF.
+struct Document {
+    var image: CGImage
+    /// Page size in points — non-nil only for PDFs, so the copy can be written
+    /// back as a PDF at the original physical dimensions.
+    var pageSize: CGSize?
+    var pageCount: Int
+}
+
+func looksLikePDF(_ url: URL) -> Bool {
+    if url.pathExtension.lowercased() == "pdf" { return true }
+    if let t = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType {
+        return t.conforms(to: .pdf)
+    }
+    return false
+}
+
+/// Rasterize page 1 of a PDF onto white. See the note at the top of the file
+/// for why we flatten rather than overlay.
+func loadPDFPage(_ url: URL) -> Document? {
+    guard let doc = PDFDocument(url: url), let page = doc.page(at: 0) else { return nil }
+    let box = page.bounds(for: .mediaBox)
+    let w = Int((box.width * pdfScale).rounded())
+    let h = Int((box.height * pdfScale).rounded())
+    guard let ctx = makeContext(w, h) else { return nil }
+    ctx.setFillColor(CGColor(gray: 1, alpha: 1))      // PDFs assume paper
+    ctx.fill(CGRect(x: 0, y: 0, width: w, height: h))
+    ctx.scaleBy(x: pdfScale, y: pdfScale)
+    page.draw(with: .mediaBox, to: ctx)
+    guard let img = ctx.makeImage() else { return nil }
+    return Document(image: img, pageSize: box.size, pageCount: doc.pageCount)
+}
+
+func loadDocument(_ url: URL) -> Document? {
+    if looksLikePDF(url) { return loadPDFPage(url) }
+    guard let img = loadImage(url) else { return nil }
+    return Document(image: img, pageSize: nil, pageCount: 1)
 }
 
 /// Crop by redrawing into a fresh context — keeps bottom-left origin semantics
@@ -116,12 +164,12 @@ func obscure(_ img: CGImage, rect rawRect: CGRect, tool: Tool, level: Int) -> CG
 
 // MARK: - Saving
 
-func saveCopy(_ img: CGImage, basedOn url: URL) -> URL? {
+func saveCopy(_ img: CGImage, basedOn url: URL, pageSize: CGSize?) -> URL? {
     let dir = url.deletingLastPathComponent()
     let stem = url.deletingPathExtension().lastPathComponent
     let ext = url.pathExtension.lowercased()
     let isJPEG = (ext == "jpg" || ext == "jpeg")
-    let outExt = isJPEG ? "jpg" : "png"
+    let outExt = pageSize != nil ? "pdf" : (isJPEG ? "jpg" : "png")
     let type: CFString = (isJPEG ? "public.jpeg" : "public.png") as CFString
 
     var out = dir.appendingPathComponent("\(stem)-pixelated.\(outExt)")
@@ -129,6 +177,18 @@ func saveCopy(_ img: CGImage, basedOn url: URL) -> URL? {
     while FileManager.default.fileExists(atPath: out.path) {
         out = dir.appendingPathComponent("\(stem)-pixelated-\(n).\(outExt)")
         n += 1
+    }
+
+    // PDF in -> one-page PDF out, at the original page size in points so it
+    // prints and measures identically to the original.
+    if let pageSize {
+        var box = CGRect(origin: .zero, size: pageSize)
+        guard let ctx = CGContext(out as CFURL, mediaBox: &box, nil) else { return nil }
+        ctx.beginPDFPage(nil as CFDictionary?)
+        ctx.draw(img, in: box)
+        ctx.endPDFPage()
+        ctx.closePDF()
+        return FileManager.default.fileExists(atPath: out.path) ? out : nil
     }
 
     guard let dest = CGImageDestinationCreateWithURL(out as CFURL, type, 1, nil) else { return nil }
@@ -146,6 +206,7 @@ final class CanvasView: NSView {
     var level: Int = 1 { didSet { needsDisplay = true } }
     var filename: String = "" { didSet { needsDisplay = true } }
     var edits: Int = 0 { didSet { needsDisplay = true } }
+    var badge: String = "" { didSet { needsDisplay = true } }
     var onRegion: ((CGRect) -> Void)?
 
     private var dragStart: CGPoint?
@@ -202,7 +263,8 @@ final class CanvasView: NSView {
     }
 
     private func drawHUD() {
-        let line1 = "\(filename)   ·   \(tool.label)   ·   strength \(level + 1)/3   ·   \(edits) edit\(edits == 1 ? "" : "s")"
+        var line1 = "\(filename)   ·   \(tool.label)   ·   strength \(level + 1)/3   ·   \(edits) edit\(edits == 1 ? "" : "s")"
+        if !badge.isEmpty { line1 += "   ·   \(badge)" }
         let line2 = "drag to cover   1 pixelate  2 blur  3 black   [ ] strength   ⌘Z undo   ⌘S save copy   ⌘W skip"
         let text = line1 + "\n" + line2
 
@@ -271,6 +333,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow!
     private var canvas: CanvasView!
     private var current: CGImage?
+    private var pageSize: CGSize?
+    private var pageCount = 1
     private var undoStack: [CGImage] = []
     private var savedFiles: [URL] = []
     private var unreadable: [URL] = []
@@ -347,8 +411,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let panel = NSOpenPanel()
         panel.allowsMultipleSelection = true
         panel.canChooseDirectories = false
-        panel.allowedContentTypes = [.image]   // covers heic/webp/etc. automatically
-        panel.message = "Choose image(s) to pixelate"
+        panel.allowedContentTypes = [.image, .pdf]   // .image covers heic/webp/etc.
+        panel.message = "Choose image(s) or a PDF to pixelate"
         if panel.runModal() == .OK { queue = panel.urls }
     }
 
@@ -357,7 +421,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func loadCurrent() {
         guard index < queue.count else { finish(); return }
         let url = queue[index]
-        guard let img = loadImage(url) else {
+        guard let doc = loadDocument(url) else {
             // Unreadable file — skip it rather than dying, but remember it so
             // we can explain ourselves instead of just vanishing.
             unreadable.append(url)
@@ -365,13 +429,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             loadCurrent()
             return
         }
-        current = img
+        current = doc.image
+        pageSize = doc.pageSize
+        pageCount = doc.pageCount
         undoStack = []
-        canvas.image = img
+        canvas.image = doc.image
         canvas.filename = url.lastPathComponent
         canvas.edits = 0
+        canvas.badge = doc.pageCount > 1 ? "page 1 of \(doc.pageCount) — only page 1 is saved" : ""
+
+        // PDFs are usually text, and pixelated text stays legible at low
+        // strength even though the text layer is gone — so start on black.
+        if doc.pageSize != nil { canvas.tool = .solid }
+
         window.title = "Pixelator — \(url.lastPathComponent)  (\(index + 1) of \(queue.count))"
-        fitWindow(to: img)
+        fitWindow(to: doc.image)
     }
 
     private func fitWindow(to img: CGImage) {
@@ -400,8 +472,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         } else if !unreadable.isEmpty {
             let alert = NSAlert()
             alert.messageText = unreadable.count == 1
-                ? "Couldn't read that image"
-                : "Couldn't read any of those \(unreadable.count) images"
+                ? "Couldn't read that file"
+                : "Couldn't read any of those \(unreadable.count) files"
             alert.informativeText =
                 unreadable.prefix(5).map { $0.lastPathComponent }.joined(separator: "\n")
                 + "\n\nIf they live in Desktop, Documents or Downloads, macOS may be "
@@ -428,7 +500,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             NSSound.beep()
             return
         }
-        if let out = saveCopy(img, basedOn: queue[index]) {
+        if pageCount > 1 {
+            let warn = NSAlert()
+            warn.messageText = "This PDF has \(pageCount) pages"
+            warn.informativeText = "Pixelator works on the first page. The copy will "
+                + "contain page 1 only — the other \(pageCount - 1) won't be included."
+            warn.addButton(withTitle: "Save Page 1")
+            warn.addButton(withTitle: "Cancel")
+            guard warn.runModal() == .alertFirstButtonReturn else { return }
+        }
+        if let out = saveCopy(img, basedOn: queue[index], pageSize: pageSize) {
             savedFiles.append(out)
         } else {
             let alert = NSAlert()
@@ -497,7 +578,68 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// MARK: - Self test
+
+/// `Pixelator --selftest` — proves the property the PDF path exists for:
+/// after pixelating, the text is really gone, not just covered up.
+func selfTest() -> Int32 {
+    let secret = "SECRET-90210-CONFIDENTIAL"
+    let src = FileManager.default.temporaryDirectory
+        .appendingPathComponent("pixelator-selftest.pdf")
+    try? FileManager.default.removeItem(at: src)
+
+    var box = CGRect(x: 0, y: 0, width: 612, height: 792)
+    guard let pdf = CGContext(src as CFURL, mediaBox: &box, nil) else {
+        print("FAIL: could not create test PDF"); return 1
+    }
+    pdf.beginPDFPage(nil as CFDictionary?)
+    let line = CTLineCreateWithAttributedString(NSAttributedString(
+        string: secret, attributes: [.font: NSFont.systemFont(ofSize: 24)]))
+    pdf.textPosition = CGPoint(x: 72, y: 700)
+    CTLineDraw(line, pdf)
+    pdf.endPDFPage()
+    pdf.closePDF()
+
+    guard let before = PDFDocument(url: src)?.string, before.contains(secret) else {
+        print("FAIL: test PDF has no extractable text to begin with"); return 1
+    }
+    print("ok   test PDF contains extractable text: \(secret)")
+
+    guard let doc = loadDocument(src) else { print("FAIL: could not load the PDF"); return 1 }
+    guard doc.pageSize != nil else { print("FAIL: not recognised as a PDF"); return 1 }
+    print("ok   rasterized \(doc.image.width)x\(doc.image.height)px from \(Int(doc.pageSize!.width))x\(Int(doc.pageSize!.height))pt")
+
+    let band = CGRect(x: 0, y: CGFloat(doc.image.height) - 320,
+                      width: CGFloat(doc.image.width), height: 320)
+    guard let flat = obscure(doc.image, rect: band, tool: .solid, level: 1) else {
+        print("FAIL: obscure() returned nil"); return 1
+    }
+    guard let out = saveCopy(flat, basedOn: src, pageSize: doc.pageSize) else {
+        print("FAIL: could not write the PDF copy"); return 1
+    }
+    defer { try? FileManager.default.removeItem(at: out); try? FileManager.default.removeItem(at: src) }
+
+    guard let result = PDFDocument(url: out) else { print("FAIL: output is not a PDF"); return 1 }
+    let after = (result.string ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+    guard result.pageCount == 1 else { print("FAIL: expected 1 page, got \(result.pageCount)"); return 1 }
+    let size = result.page(at: 0)!.bounds(for: .mediaBox).size
+    guard Int(size.width) == 612, Int(size.height) == 792 else {
+        print("FAIL: page size became \(Int(size.width))x\(Int(size.height))pt"); return 1
+    }
+    print("ok   output is 1 page at \(Int(size.width))x\(Int(size.height))pt")
+
+    if after.contains(secret) || !after.isEmpty {
+        print("FAIL: text survived — extractable: \"\(after)\"")
+        return 1
+    }
+    print("ok   no extractable text in the output")
+    print("PASS")
+    return 0
+}
+
 // MARK: - Entry point
+
+if CommandLine.arguments.contains("--selftest") { exit(selfTest()) }
 
 let delegate = AppDelegate()
 let app = NSApplication.shared

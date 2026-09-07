@@ -12,13 +12,14 @@
 			<key>NSMenuItem</key>
 			<dict>
 				<key>default</key>
-				<string>Pixelate Image</string>
+				<string>Pixelate Image or PDF</string>
 			</dict>
 			<key>NSMessage</key>
 			<string>runWorkflowAsService</string>
 			<key>NSSendFileTypes</key>
 			<array>
 				<string>public.image</string>
+				<string>public.pdf</string>
 			</array>
 		</dict>
 	</array>

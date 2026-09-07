@@ -191,7 +191,7 @@ open -n -b local.pixelator --args "$@" 2&gt;/dev/null \
 		<key>serviceApplicationBundleID</key>
 		<string></string>
 		<key>serviceInputTypeIdentifier</key>
-		<string>com.apple.Automator.fileSystemObject.image</string>
+		<string>com.apple.Automator.fileSystemObject</string>
 		<key>serviceOutputTypeIdentifier</key>
 		<string>com.apple.Automator.nothing</string>
 		<key>serviceProcessesInput</key>
