@@ -147,7 +147,15 @@ serviceInputTypeIdentifier = com.apple.Automator.fileSystemObject
 the right-click menu and silently does nothing. `com.apple.Automator.fileSystemObject.image`
 (what Apple's own `Set Desktop Picture.workflow` uses) works but takes images only;
 the generic `fileSystemObject` above accepts images and PDFs, with `NSSendFileTypes`
-doing the filtering. The shell action must also pass input **as
+doing the filtering.
+
+The other trap is the PDF type itself. **There is no `public.pdf`** — the UTI is
+`com.adobe.pdf`, and a PDF's type tree contains no `public.pdf` at all, so declaring
+it silently matches nothing: the app won't be offered in Open With and the Quick
+Action won't appear for PDFs. Both `CFBundleDocumentTypes` and `NSSendFileTypes` need
+`com.adobe.pdf`. Note that performing a service by name (`NSPerformService`) bypasses
+type matching entirely, so it will happily succeed while the menu item is invisible —
+check eligibility with `NSWorkspace.urlsForApplications(toOpen:)` instead. The shell action must also pass input **as
 arguments**, not stdin, and resolve the app by bundle id (`local.pixelator`) so moving
 the app doesn't break it.
 

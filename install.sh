@@ -75,7 +75,7 @@ cat > "$APP/Contents/Info.plist" <<'PLIST'
             <key>LSItemContentTypes</key>
             <array>
                 <string>public.image</string>
-                <string>public.pdf</string>
+                <string>com.adobe.pdf</string>
             </array>
         </dict>
     </array>
